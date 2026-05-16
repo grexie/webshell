@@ -1,0 +1,9 @@
+.git
+.DS_Store
+node_modules
+packages/website/node_modules
+packages/website/.next
+packages/website/out
+coverage
+*.log
+.env*

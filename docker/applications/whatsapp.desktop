@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=WhatsApp
+Exec=/usr/local/bin/webshell-whatsapp
+Icon=google-chrome
+Terminal=false
+Categories=Network;Chat;

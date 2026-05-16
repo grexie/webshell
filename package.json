@@ -1,0 +1,13 @@
+{
+  "name": "webshell",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace packages/website run dev",
+    "build": "npm --workspace packages/website run build",
+    "lint": "npm --workspace packages/website run lint",
+    "test": "go test ./cmd/... ./pkg/... ./packages/website"
+  }
+}

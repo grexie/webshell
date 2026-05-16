@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Chrome's Linux sandbox relies on kernel namespace operations that are commonly
+# blocked in Docker Desktop and other restricted container runtimes. Route every
+# in-container Chrome launch through Docker-safe defaults, including users who
+# type `google-chrome` directly in a WebShell desktop terminal.
+
+browser=""
+for candidate in \
+  /usr/bin/google-chrome-stable \
+  /opt/google/chrome/google-chrome \
+  /usr/bin/google-chrome \
+  /usr/bin/chromium \
+  /usr/bin/chromium-browser; do
+  if [[ -x "${candidate}" && "${candidate}" != "$0" ]]; then
+    browser="${candidate}"
+    break
+  fi
+done
+
+if [[ -z "${browser}" ]]; then
+  echo "webshell-google-chrome: no Chrome or Chromium binary found" >&2
+  exit 127
+fi
+
+flags=(
+  --no-sandbox
+  --disable-dev-shm-usage
+  --disable-gpu
+  --disable-crash-reporter
+  --no-first-run
+  --ozone-platform=x11
+  --password-store=basic
+)
+
+if [[ -n "${WEBSHELL_CHROME_FLAGS:-}" ]]; then
+  # Intentional word splitting: this env var is an escape hatch for simple
+  # Chromium flags in development containers.
+  # shellcheck disable=SC2206
+  extra_flags=(${WEBSHELL_CHROME_FLAGS})
+else
+  extra_flags=()
+fi
+
+exec "${browser}" "${flags[@]}" "${extra_flags[@]}" "$@"

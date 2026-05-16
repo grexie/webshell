@@ -1,0 +1,14 @@
+[Unit]
+Description=WebShell
+After=network.target dbus.service systemd-logind.service
+Wants=dbus.service systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/webshell-service-start
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

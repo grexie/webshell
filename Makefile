@@ -1,0 +1,158 @@
+SHELL := /bin/bash
+
+HOST_ARCH := $(shell uname -m)
+DEFAULT_SYSTEMD_DOCKER_PLATFORM := $(if $(filter arm64 aarch64,$(HOST_ARCH)),linux/arm64,linux/amd64)
+
+IMAGE ?= webshell
+REGISTRY_IMAGE ?= ghcr.io/grexie/webshell
+TAG ?= latest
+BUILDX_PLATFORMS ?= linux/amd64,linux/arm64
+BUILDX_OUTPUT ?=
+BUILDX_FLAGS ?=
+API_PORT ?= 8080
+WEB_PORT ?= 3000
+GUI_COMMAND ?= xterm
+GUI_XSERVER ?= auto
+DESKTOP_GUI_COMMAND ?= webshell-gui-session
+DESKTOP_GUI_DEFAULT ?= gnome
+GUI_WIDTH ?= 1280
+GUI_HEIGHT ?= 720
+GUI_FPS ?= 25
+GUI_QUALITY ?= 100
+GNOME_LOCK_ENABLED ?= false
+GNOME_KEYRING_ENABLED ?= true
+GNOME_KEYRING_COMPONENTS ?= pkcs11,secrets
+GNOME_KEYRING_SSH_AGENT ?= false
+AUDIO_ENABLED ?= true
+AUDIO_LATENCY_MS ?= 350
+E2EE_ENABLED ?= true
+E2EE_REQUIRED ?= true
+COMPRESSION_ENABLED ?= false
+DOCKER_PLATFORM ?= $(DEFAULT_SYSTEMD_DOCKER_PLATFORM)
+WEBSHELL_USER ?= webshell
+WEBSHELL_UID ?= 1000
+WEBSHELL_GID ?= 1000
+WEBSHELL_HOME ?= /home/$(WEBSHELL_USER)
+WEBSHELL_USER_SHELL ?= /bin/bash
+WEBSHELL_USER_SUDO ?= true
+WEBSHELL_USER_SUDO_NOPASSWD ?= true
+WEBSHELL_HOME_VOLUME ?= webshell-home
+WEBSHELL_CONTAINER ?= webshell
+DEBUG_KEYS ?= false
+AUTHORIZED_KEYS ?= $(HOME)/.ssh/authorized_keys
+BUILD_ID ?= $(shell date -u +%Y%m%d%H%M%S)
+DOCKER_BUILD_FLAGS ?=
+DEVGUI_CONTAINER ?= webshell-devgui
+SYSTEMD_DOCKER_PLATFORM ?= $(DEFAULT_SYSTEMD_DOCKER_PLATFORM)
+SYSTEMD_ENTRYPOINT ?= /usr/local/bin/webshell-systemd-entrypoint
+SYSTEMD_DOCKER_FLAGS ?= --privileged --cgroupns=private --tmpfs /run:rw,exec,nosuid,nodev,mode=755 --tmpfs /run/lock:rw,exec,nosuid,nodev,mode=755 --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777 --stop-signal=SIGRTMIN+3
+
+.PHONY: build buildx deploy deployx dev devgui test typecheck webshell
+
+build:
+	docker build $(DOCKER_BUILD_FLAGS) --platform $(DOCKER_PLATFORM) --build-arg WEBSHELL_BUILD_ID=$(BUILD_ID) -t $(IMAGE):$(TAG) .
+
+buildx:
+	docker buildx build $(DOCKER_BUILD_FLAGS) $(BUILDX_FLAGS) --platform $(BUILDX_PLATFORMS) --build-arg WEBSHELL_BUILD_ID=$(BUILD_ID) -t $(IMAGE):$(TAG) $(if $(BUILDX_OUTPUT),--output $(BUILDX_OUTPUT),) .
+
+deploy:
+	docker build --platform $(DOCKER_PLATFORM) -t $(REGISTRY_IMAGE):$(TAG) .
+	docker push $(REGISTRY_IMAGE):$(TAG)
+
+deployx:
+	docker buildx build $(DOCKER_BUILD_FLAGS) $(BUILDX_FLAGS) --platform $(BUILDX_PLATFORMS) --build-arg WEBSHELL_BUILD_ID=$(BUILD_ID) -t $(REGISTRY_IMAGE):$(TAG) --push .
+
+dev:
+	@set -euo pipefail; \
+	trap 'kill "$$api_pid" 2>/dev/null || true' EXIT INT TERM; \
+	WEBSHELL_PORT=$(API_PORT) go run ./cmd/webshell & \
+	api_pid=$$!; \
+	NEXT_PUBLIC_API_BASE=http://localhost:$(API_PORT) npm --workspace packages/website run dev -- --port $(WEB_PORT)
+
+devgui: build
+	@set -euo pipefail; \
+	if [[ ! -f "$(AUTHORIZED_KEYS)" ]]; then \
+		echo "authorized_keys not found: $(AUTHORIZED_KEYS)" >&2; \
+		exit 1; \
+	fi; \
+	docker run --rm \
+		--name $(DEVGUI_CONTAINER) \
+		-p $(API_PORT):8080 \
+		-e WEBSHELL_USER=$(WEBSHELL_USER) \
+		-e WEBSHELL_UID=$(WEBSHELL_UID) \
+		-e WEBSHELL_GID=$(WEBSHELL_GID) \
+		-e WEBSHELL_HOME=$(WEBSHELL_HOME) \
+		-e WEBSHELL_USER_SHELL=$(WEBSHELL_USER_SHELL) \
+		-e WEBSHELL_USER_SUDO=$(WEBSHELL_USER_SUDO) \
+		-e WEBSHELL_USER_SUDO_NOPASSWD=$(WEBSHELL_USER_SUDO_NOPASSWD) \
+		-e WEBSHELL_AUTHORIZED_KEYS=/authorized_keys \
+		-e WEBSHELL_GUI_ENABLED=true \
+		-e WEBSHELL_GUI_COMMAND='$(GUI_COMMAND)' \
+		-e WEBSHELL_GUI_XSERVER=$(GUI_XSERVER) \
+		-e WEBSHELL_GUI_WIDTH=$(GUI_WIDTH) \
+		-e WEBSHELL_GUI_HEIGHT=$(GUI_HEIGHT) \
+		-e WEBSHELL_GUI_FPS=$(GUI_FPS) \
+		-e WEBSHELL_GUI_QUALITY=$(GUI_QUALITY) \
+		-e WEBSHELL_GNOME_LOCK_ENABLED=$(GNOME_LOCK_ENABLED) \
+		-e WEBSHELL_GNOME_KEYRING_ENABLED=$(GNOME_KEYRING_ENABLED) \
+		-e WEBSHELL_GNOME_KEYRING_COMPONENTS=$(GNOME_KEYRING_COMPONENTS) \
+		-e WEBSHELL_GNOME_KEYRING_SSH_AGENT=$(GNOME_KEYRING_SSH_AGENT) \
+		-e WEBSHELL_AUDIO_ENABLED=$(AUDIO_ENABLED) \
+		-e WEBSHELL_AUDIO_LATENCY_MS=$(AUDIO_LATENCY_MS) \
+		-e WEBSHELL_E2EE_ENABLED=$(E2EE_ENABLED) \
+		-e WEBSHELL_E2EE_REQUIRED=$(E2EE_REQUIRED) \
+		-e WEBSHELL_COMPRESSION_ENABLED=$(COMPRESSION_ENABLED) \
+		-e WEBSHELL_DEBUG_KEYS=$(DEBUG_KEYS) \
+		-v "$(AUTHORIZED_KEYS):/authorized_keys:ro" \
+		-v "$(WEBSHELL_HOME_VOLUME):$(WEBSHELL_HOME)" \
+		$(IMAGE):$(TAG)
+
+webshell:
+	@set -euo pipefail; \
+	if [[ ! -f "$(AUTHORIZED_KEYS)" ]]; then \
+		echo "authorized_keys not found: $(AUTHORIZED_KEYS)" >&2; \
+		exit 1; \
+	fi; \
+	$(MAKE) build DOCKER_PLATFORM=$(SYSTEMD_DOCKER_PLATFORM); \
+	docker run --rm \
+		--name $(WEBSHELL_CONTAINER) \
+		--platform $(SYSTEMD_DOCKER_PLATFORM) \
+		$(SYSTEMD_DOCKER_FLAGS) \
+		--entrypoint $(SYSTEMD_ENTRYPOINT) \
+		-p $(API_PORT):8080 \
+		-e WEBSHELL_USER=$(WEBSHELL_USER) \
+		-e WEBSHELL_UID=$(WEBSHELL_UID) \
+		-e WEBSHELL_GID=$(WEBSHELL_GID) \
+		-e WEBSHELL_HOME=$(WEBSHELL_HOME) \
+		-e WEBSHELL_USER_SHELL=$(WEBSHELL_USER_SHELL) \
+		-e WEBSHELL_USER_SUDO=$(WEBSHELL_USER_SUDO) \
+		-e WEBSHELL_USER_SUDO_NOPASSWD=$(WEBSHELL_USER_SUDO_NOPASSWD) \
+		-e WEBSHELL_AUTHORIZED_KEYS=/authorized_keys \
+		-e WEBSHELL_GUI_ENABLED=true \
+		-e WEBSHELL_GUI_DEFAULT=$(DESKTOP_GUI_DEFAULT) \
+		-e WEBSHELL_GUI_COMMAND='$(DESKTOP_GUI_COMMAND)' \
+		-e WEBSHELL_GUI_XSERVER=$(GUI_XSERVER) \
+		-e WEBSHELL_GUI_WIDTH=$(GUI_WIDTH) \
+		-e WEBSHELL_GUI_HEIGHT=$(GUI_HEIGHT) \
+		-e WEBSHELL_GUI_DEPTH=24 \
+		-e WEBSHELL_GUI_FPS=$(GUI_FPS) \
+		-e WEBSHELL_GUI_QUALITY=$(GUI_QUALITY) \
+		-e WEBSHELL_GNOME_LOCK_ENABLED=$(GNOME_LOCK_ENABLED) \
+		-e WEBSHELL_GNOME_KEYRING_ENABLED=$(GNOME_KEYRING_ENABLED) \
+		-e WEBSHELL_GNOME_KEYRING_COMPONENTS=$(GNOME_KEYRING_COMPONENTS) \
+		-e WEBSHELL_GNOME_KEYRING_SSH_AGENT=$(GNOME_KEYRING_SSH_AGENT) \
+		-e WEBSHELL_AUDIO_ENABLED=$(AUDIO_ENABLED) \
+		-e WEBSHELL_AUDIO_LATENCY_MS=$(AUDIO_LATENCY_MS) \
+		-e WEBSHELL_E2EE_ENABLED=$(E2EE_ENABLED) \
+		-e WEBSHELL_E2EE_REQUIRED=$(E2EE_REQUIRED) \
+		-e WEBSHELL_COMPRESSION_ENABLED=$(COMPRESSION_ENABLED) \
+		-e WEBSHELL_DEBUG_KEYS=$(DEBUG_KEYS) \
+		-v "$(AUTHORIZED_KEYS):/authorized_keys:ro" \
+		-v "$(WEBSHELL_HOME_VOLUME):$(WEBSHELL_HOME)" \
+		$(IMAGE):$(TAG)
+
+test:
+	go test ./cmd/... ./pkg/... ./packages/website
+
+typecheck:
+	npm --workspace packages/website run typecheck

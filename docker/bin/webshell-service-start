@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -f /run/webshell/container.env ]]; then
+  # shellcheck disable=SC1091
+  source /run/webshell/container.env
+fi
+
+exec /usr/local/bin/webshell-entrypoint /app/webshell

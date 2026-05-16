@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Telegram
+Exec=/usr/local/bin/telegram-desktop
+Icon=telegram
+Terminal=false
+Categories=Network;Chat;

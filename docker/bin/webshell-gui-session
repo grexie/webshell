@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+set -u
+
+# Full GNOME Shell is fragile inside Xvfb/container environments because it can
+# depend on compositing and session services that are not always available. This
+# launcher keeps the WebShell GUI session alive by trying desktop profiles in a
+# stable order, falling back to simpler X11 sessions instead of exiting.
+
+export XDG_SESSION_TYPE=x11
+export GDK_BACKEND=x11
+export QT_QPA_PLATFORM=xcb
+export NO_AT_BRIDGE=1
+export DBUS_FATAL_WARNINGS=0
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+if [[ -n "${SSH_AUTH_SOCK:-}" && -z "${WEBSHELL_BROWSER_SSH_AUTH_SOCK:-}" ]]; then
+  export WEBSHELL_BROWSER_SSH_AUTH_SOCK="${SSH_AUTH_SOCK}"
+fi
+
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+  uid="$(id -u 2>/dev/null || echo 1000)"
+  export XDG_RUNTIME_DIR="/tmp/runtime-${uid}"
+fi
+mkdir -p "${XDG_RUNTIME_DIR}"
+chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+
+profile="$(printf '%s' "${WEBSHELL_GUI_DEFAULT:-xfce}" | tr '[:upper:]' '[:lower:]')"
+
+set_gsetting() {
+  local schema="$1"
+  local key="$2"
+  shift 2
+
+  if ! command -v gsettings >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! gsettings list-schemas 2>/dev/null | grep -Fxq "${schema}"; then
+    return 0
+  fi
+  if ! gsettings list-keys "${schema}" 2>/dev/null | grep -Fxq "${key}"; then
+    return 0
+  fi
+
+  gsettings set "${schema}" "${key}" "$@" >/dev/null 2>&1 || true
+}
+
+disable_gnome_locking() {
+  if [[ "${WEBSHELL_GNOME_LOCK_ENABLED:-false}" == "true" ]]; then
+    return 0
+  fi
+
+  set_gsetting org.gnome.desktop.lockdown disable-lock-screen true
+  set_gsetting org.gnome.desktop.screensaver lock-enabled false
+  set_gsetting org.gnome.desktop.screensaver idle-activation-enabled false
+  set_gsetting org.gnome.desktop.screensaver lock-delay "uint32 0"
+  set_gsetting org.gnome.desktop.session idle-delay "uint32 0"
+  set_gsetting org.gnome.settings-daemon.plugins.power idle-dim false
+  set_gsetting org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type "'nothing'"
+  set_gsetting org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type "'nothing'"
+}
+
+restore_webshell_ssh_agent() {
+  if [[ "${WEBSHELL_GNOME_KEYRING_SSH_AGENT:-false}" == "true" ]]; then
+    return 0
+  fi
+  if [[ -n "${WEBSHELL_BROWSER_SSH_AUTH_SOCK:-}" ]]; then
+    export SSH_AUTH_SOCK="${WEBSHELL_BROWSER_SSH_AUTH_SOCK}"
+  fi
+}
+
+publish_session_environment() {
+  restore_webshell_ssh_agent
+  if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment SSH_AUTH_SOCK GNOME_KEYRING_CONTROL >/dev/null 2>&1 || true
+  fi
+}
+
+configure_gnome_keyring_ssh_autostart() {
+  local config_home autostart_dir autostart_file
+
+  config_home="${XDG_CONFIG_HOME:-${HOME:-}/.config}"
+  if [[ -z "${config_home}" ]]; then
+    return 0
+  fi
+
+  autostart_dir="${config_home}/autostart"
+  autostart_file="${autostart_dir}/gnome-keyring-ssh.desktop"
+
+  if [[ "${WEBSHELL_GNOME_KEYRING_SSH_AGENT:-false}" == "true" ]]; then
+    rm -f "${autostart_file}" 2>/dev/null || true
+    return 0
+  fi
+
+  mkdir -p "${autostart_dir}" 2>/dev/null || true
+  cat >"${autostart_file}" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=SSH Key Agent
+Hidden=true
+NoDisplay=true
+X-GNOME-Autostart-enabled=false
+EOF
+}
+
+gnome_keyring_components() {
+  local raw item filtered
+
+  raw="${WEBSHELL_GNOME_KEYRING_COMPONENTS:-pkcs11,secrets}"
+  filtered=""
+  IFS=',' read -r -a component_list <<<"${raw}"
+  for item in "${component_list[@]}"; do
+    item="${item//[[:space:]]/}"
+    if [[ -z "${item}" ]]; then
+      continue
+    fi
+    if [[ "${item}" == "ssh" && "${WEBSHELL_GNOME_KEYRING_SSH_AGENT:-false}" != "true" ]]; then
+      continue
+    fi
+    if [[ -z "${filtered}" ]]; then
+      filtered="${item}"
+    else
+      filtered="${filtered},${item}"
+    fi
+  done
+
+  if [[ -z "${filtered}" ]]; then
+    filtered="pkcs11,secrets"
+  fi
+  printf '%s' "${filtered}"
+}
+
+apply_gnome_keyring_env() {
+  local line
+
+  while IFS= read -r line; do
+    case "${line}" in
+      GNOME_KEYRING_CONTROL=*)
+        export "${line}"
+        ;;
+      SSH_AUTH_SOCK=*)
+        # WebShell has its own SSH-agent forwarding path. Keep gnome-keyring's
+        # SSH component opt-in so it does not accidentally replace that socket.
+        if [[ "${WEBSHELL_GNOME_KEYRING_SSH_AGENT:-false}" == "true" ]]; then
+          export "${line}"
+        fi
+        ;;
+    esac
+  done <<<"${1:-}"
+}
+
+start_gnome_keyring() {
+  if [[ "${WEBSHELL_GNOME_KEYRING_ENABLED:-true}" != "true" ]]; then
+    return 0
+  fi
+  if ! command -v gnome-keyring-daemon >/dev/null 2>&1; then
+    echo "webshell-gui-session: gnome-keyring-daemon unavailable" >&2
+    return 0
+  fi
+
+  local display_token control_dir components output
+  display_token="$(printf '%s' "${DISPLAY:-session}" | tr -c 'A-Za-z0-9_.-' '_')"
+  control_dir="${XDG_RUNTIME_DIR}/webshell-keyring-${display_token}"
+  components="$(gnome_keyring_components)"
+
+  mkdir -p "${control_dir}"
+  chmod 700 "${control_dir}" 2>/dev/null || true
+  export GNOME_KEYRING_CONTROL="${control_dir}"
+
+  # There is no PAM login inside a WebShell GUI session, and the container user
+  # commonly has no password. Emulate PAM's login unlock with an empty password
+  # so libsecret/Chrome/VS Code can use Secret Service without prompting.
+  output="$(printf '\n' | gnome-keyring-daemon \
+    --daemonize \
+    --login \
+    --components="${components}" \
+    --control-directory "${control_dir}" 2>/dev/null || true)"
+  apply_gnome_keyring_env "${output}"
+
+  output="$(gnome-keyring-daemon \
+    --start \
+    --components="${components}" \
+    --control-directory "${control_dir}" 2>/dev/null || true)"
+  apply_gnome_keyring_env "${output}"
+
+  if [[ "${WEBSHELL_GNOME_KEYRING_SSH_AGENT:-false}" != "true" ]]; then
+    rm -f "${control_dir}/ssh" 2>/dev/null || true
+  fi
+  restore_webshell_ssh_agent
+}
+
+if [[ "${1:-}" == "--desktop-session" || "${1:-}" == "--gnome-session" ]]; then
+  shift
+  configure_gnome_keyring_ssh_autostart
+  start_gnome_keyring
+  disable_gnome_locking
+  publish_session_environment
+  exec "$@"
+fi
+
+run_candidate() {
+  local label="$1"
+  shift
+  local binary="$1"
+
+  if ! command -v "${binary}" >/dev/null 2>&1; then
+    echo "webshell-gui-session: ${label} unavailable: ${binary} not found" >&2
+    return 127
+  fi
+
+  echo "webshell-gui-session: starting ${label}" >&2
+  "$@"
+  local status=$?
+  echo "webshell-gui-session: ${label} exited with status ${status}" >&2
+  return "${status}"
+}
+
+have_system_bus() {
+  [[ -S /run/dbus/system_bus_socket ]]
+}
+
+have_systemd_session_services() {
+  [[ -d /run/systemd/system ]]
+}
+
+run_gnome_candidate() {
+  local label="$1"
+  shift
+
+  if ! have_system_bus; then
+    echo "webshell-gui-session: ${label} skipped: /run/dbus/system_bus_socket is unavailable" >&2
+    return 125
+  fi
+
+  # GNOME sessions can degrade into a long-lived failed-session window when the
+  # container has DBus but no systemd/logind. In that case the correct Docker UX
+  # is to skip GNOME and fall through to XFCE/Openbox instead of leaving the user
+  # staring at a broken desktop. Set this override when running a systemd-enabled
+  # container and intentionally testing GNOME anyway.
+  if [[ "${WEBSHELL_GUI_TRY_GNOME_WITHOUT_SYSTEMD:-false}" != "true" ]] && ! have_systemd_session_services; then
+    echo "webshell-gui-session: ${label} skipped: systemd/logind session services are unavailable" >&2
+    return 125
+  fi
+
+  run_candidate "${label}" "$@"
+}
+
+run_gnome_session() {
+  dbus-run-session -- "$0" --desktop-session "$@"
+}
+
+run_desktop_session() {
+  dbus-run-session -- "$0" --desktop-session "$@"
+}
+
+run_openbox_xterm() {
+  if ! command -v openbox >/dev/null 2>&1 || ! command -v xterm >/dev/null 2>&1; then
+    return 127
+  fi
+
+  echo "webshell-gui-session: starting Openbox + xterm fallback" >&2
+  openbox >/tmp/webshell-openbox.log 2>&1 &
+  local wm_pid=$!
+  xterm
+  local status=$?
+  kill "${wm_pid}" >/dev/null 2>&1 || true
+  wait "${wm_pid}" >/dev/null 2>&1 || true
+  return "${status}"
+}
+
+case "${profile}" in
+  gnome | "")
+    export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-GNOME-Flashback:GNOME}"
+    export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-gnome-flashback-metacity}"
+    export DESKTOP_SESSION="${DESKTOP_SESSION:-gnome-flashback-metacity}"
+    run_gnome_candidate "GNOME Flashback" run_gnome_session gnome-session --session=gnome-flashback-metacity && exit 0
+    ;;
+  gnome-shell)
+    export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-GNOME}"
+    export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-gnome}"
+    export DESKTOP_SESSION="${DESKTOP_SESSION:-gnome}"
+    run_gnome_candidate "GNOME Shell" run_gnome_session gnome-session && exit 0
+    ;;
+  gnome-flashback)
+    export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-GNOME-Flashback:GNOME}"
+    export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-gnome-flashback-metacity}"
+    export DESKTOP_SESSION="${DESKTOP_SESSION:-gnome-flashback-metacity}"
+    run_gnome_candidate "GNOME Flashback" run_gnome_session gnome-session --session=gnome-flashback-metacity && exit 0
+    ;;
+  xfce | xfce4)
+    export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-XFCE}"
+    export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-xfce}"
+    export DESKTOP_SESSION="${DESKTOP_SESSION:-xfce}"
+    run_candidate "XFCE" run_desktop_session xfce4-session && exit 0
+    ;;
+  openbox)
+    run_openbox_xterm && exit 0
+    ;;
+esac
+
+run_candidate "XFCE" run_desktop_session xfce4-session && exit 0
+run_openbox_xterm && exit 0
+run_candidate "xterm" xterm && exit 0
+
+echo "webshell-gui-session: no usable X11 desktop command found" >&2
+exit 127

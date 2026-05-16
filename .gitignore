@@ -1,0 +1,15 @@
+.DS_Store
+.env.local
+.env.*.local
+
+node_modules/
+packages/website/.next/
+packages/website/out/
+
+/bin/
+!/docker/bin/
+dist/
+coverage/
+/webshell
+
+*.log

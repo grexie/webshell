@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=ChatGPT
+Exec=/usr/local/bin/webshell-chatgpt
+Icon=google-chrome
+Terminal=false
+Categories=Network;Development;

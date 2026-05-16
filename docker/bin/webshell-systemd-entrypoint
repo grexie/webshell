@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p /run/webshell /run/lock /tmp /tmp/.X11-unix /tmp/.ICE-unix
+chmod 755 /run/webshell
+chmod 1777 /tmp /tmp/.X11-unix /tmp/.ICE-unix
+
+env_file=/run/webshell/container.env
+: >"${env_file}"
+
+for name in $(env | cut -d= -f1 | sort); do
+  case "${name}" in
+    WEBSHELL_* | LANG | LC_ALL | NODE_ENV | PATH)
+      printf 'export %s=%q\n' "${name}" "${!name}" >>"${env_file}"
+      ;;
+  esac
+done
+
+if command -v journalctl >/dev/null 2>&1; then
+  (
+    while true; do
+      until [[ -S /run/systemd/journal/stdout ]]; do
+        sleep 0.2
+      done
+
+      journalctl \
+        --follow \
+        --unit webshell.service \
+        --output cat \
+        --no-hostname \
+        --no-pager \
+        >&2 || true
+
+      sleep 1
+    done
+  ) &
+fi
+
+exec /sbin/init
